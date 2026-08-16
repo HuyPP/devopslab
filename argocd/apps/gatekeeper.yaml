@@ -1,0 +1,64 @@
+# =============================================================================
+# gatekeeper.yaml — Cài OPA Gatekeeper (Admission Policy engine)
+#
+# Gatekeeper là webhook server chặn manifest xấu tại API server.
+# Thứ tự cài quan trọng (dùng sync-wave):
+#   wave 0: gatekeeper controller (CRD phải có trước)
+#   wave 1: ConstraintTemplate (định nghĩa Rego logic)
+#   wave 2: Constraint (instance áp policy)
+#
+# App này chỉ cài controller. ConstraintTemplate + Constraint
+# được quản lý bởi App "gatekeeper-policies" riêng.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gatekeeper
+  namespace: argocd
+  annotations:
+    # Wave 0: cài controller trước tất cả policy
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  source:
+    repoURL: https://open-policy-agent.github.io/gatekeeper/charts
+    chart: gatekeeper
+    targetRevision: "3.17.1"
+    helm:
+      values: |
+        # audit: kiểm tra resource đang vi phạm policy
+        # Bật audit trước khi enforce để không sập platform
+        auditInterval: 60
+        constraintViolationsLimit: 20
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gatekeeper-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+---
+# App riêng cho policies — wave 2 (sau khi controller + CRD sẵn sàng)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gatekeeper-policies
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/huypp/devopslab.git
+    targetRevision: main
+    path: gatekeeper
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gatekeeper-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

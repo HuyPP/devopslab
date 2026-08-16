@@ -1,0 +1,19 @@
+# =============================================================================
+# namespaces.yaml — sync-wave: "-1" (chạy ĐẦU TIÊN)
+#
+# Tại sao wave -1?
+#   Mọi resource (Deployment, Service, ConfigMap) đều thuộc về 1 namespace.
+#   Nếu namespace chưa tồn tại mà ArgoCD apply Deployment trước → lỗi
+#   "namespace not found". Wave -1 đảm bảo namespace sẵn sàng trước tất cả.
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    # Label này bắt buộc để Gatekeeper enforce policy trên namespace này (W10)
+    # và Sigstore Policy Controller verify image signature
+    policy.sigstore.dev/include: "true"
+    team: platform

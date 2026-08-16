@@ -1,0 +1,80 @@
+# =============================================================================
+# services.yaml — sync-wave: "2"
+#
+# Service = stable DNS name + load balancer trong cụm
+# Pod IP thay đổi mỗi lần restart, nhưng Service DNS thì không đổi.
+#
+# Loại Service dùng ở đây:
+#   - ClusterIP (default): chỉ truy cập được từ trong cụm
+#     → order-service và product-service: chỉ api-gateway gọi vào
+#   - api-gateway dùng NodePort để dev có thể truy cập từ máy local
+#     (trong production thay bằng LoadBalancer hoặc Ingress)
+#
+# Tại sao wave 2 (sau Deployment)?
+#   Service có thể tồn tại trước Deployment (K8s cho phép).
+#   Nhưng theo thứ tự logic: Deployment chạy pod xong → Service route traffic.
+#   Nếu Service up trước mà pod chưa ready → request vào sẽ bị drop.
+# =============================================================================
+
+# ---------------- api-gateway (NodePort) ----------------
+# NodePort: port 30080 trên mỗi node → forward vào pod port 8080
+# Dùng: minikube service api-gateway -n demo --url
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app: api-gateway
+spec:
+  type: NodePort
+  selector:
+    app: api-gateway      # tìm pod có label app=api-gateway
+  ports:
+    - name: http
+      port: 8080          # ClusterIP port (các service trong cụm dùng cái này)
+      targetPort: 8080    # port trên container
+      nodePort: 30080     # port trên node (truy cập từ máy host)
+---
+# ---------------- order-service (ClusterIP) ----------------
+# ClusterIP: chỉ api-gateway gọi được, không expose ra ngoài
+# DNS: http://order-service.demo.svc.cluster.local:8081
+#   hoặc ngắn hơn (cùng namespace): http://order-service:8081
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app: order-service
+spec:
+  type: ClusterIP
+  selector:
+    app: order-service
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+---
+# ---------------- product-service (ClusterIP) ----------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-service
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    app: product-service
+spec:
+  type: ClusterIP
+  selector:
+    app: product-service
+  ports:
+    - name: http
+      port: 8082
+      targetPort: 8082

@@ -1,0 +1,59 @@
+# =============================================================================
+# require-resource-limits.yaml — ConstraintTemplate F-02
+#
+# Bắt buộc mọi container phải khai báo resources.limits
+#
+# Tại sao?
+#   - Container không có limit → ăn hết RAM/CPU của node → evict 20 pods khác
+#   - K8s scheduler không biết đặt pod vào đâu nếu không có requests
+#   - Đây là nguồn gốc lỗi "node out of memory" lúc 2h sáng production
+# =============================================================================
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequireresourcelimits
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequireResourceLimits
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequireresourcelimits
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+
+          # Thiếu hoàn toàn resources block
+          not container.resources
+          msg := sprintf("Container '%v' thiếu resources block. Phải khai báo resources.limits và resources.requests.", [container.name])
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+
+          # Có resources nhưng thiếu limits
+          not container.resources.limits
+          msg := sprintf("Container '%v' thiếu resources.limits. Phải khai báo cpu và memory limits.", [container.name])
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          limits := container.resources.limits
+
+          # Có limits nhưng thiếu memory
+          not limits.memory
+          msg := sprintf("Container '%v' thiếu resources.limits.memory.", [container.name])
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          limits := container.resources.limits
+
+          # Có limits nhưng thiếu cpu
+          not limits.cpu
+          msg := sprintf("Container '%v' thiếu resources.limits.cpu.", [container.name])
+        }

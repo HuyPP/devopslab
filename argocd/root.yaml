@@ -1,0 +1,42 @@
+# =============================================================================
+# root.yaml — App-of-Apps root
+#
+# Apply file này 1 lần duy nhất bằng tay:
+#   kubectl apply -f argocd/root.yaml
+#
+# Sau đó mọi Application mới chỉ cần thêm file vào argocd/apps/ + git push.
+# Root Application tự phát hiện và tạo Application con — không kubectl nữa.
+#
+# Cơ chế:
+#   root trỏ vào path: argocd/apps/ (thư mục chứa các Application con)
+#   ArgoCD sync → tạo toàn bộ Application object trong namespace argocd
+#   Mỗi Application con lại tự sync resource của chính nó
+#
+# Giống Deployment→ReplicaSet→Pod nhưng ở layer GitOps:
+#   root Application → nhiều Application con → nhiều K8s resource
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  # finalizer: khi xóa root App, ArgoCD cascade-delete tất cả App con
+  # Bỏ finalizer nếu muốn xóa root mà giữ lại App con
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    # THAY huypp và <YOUR_REPO> trước khi dùng
+    repoURL: https://github.com/huypp/devopslab.git
+    targetRevision: main
+    path: argocd/apps          # thư mục chứa Application con
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd          # Application object sống ở ns argocd
+  syncPolicy:
+    automated:
+      prune: true              # xóa App con nếu file bị xóa khỏi Git
+      selfHeal: true           # tự sửa nếu ai drift
+    syncOptions:
+      - CreateNamespace=false  # root không tạo namespace, ns argocd đã có

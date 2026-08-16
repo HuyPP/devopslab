@@ -1,0 +1,56 @@
+# =============================================================================
+# require-owner-label.yaml — Custom ConstraintTemplate (W10 Lab 1.3)
+#
+# Bắt buộc Deployment phải có label "owner"
+#
+# Tại sao?
+#   - Label owner giúp biết team nào chịu trách nhiệm resource
+#   - Alert routing: Alertmanager route alert theo label owner → đúng team
+#   - Cost allocation: tính chi phí cloud theo owner
+#   - Tìm resource mồ côi: resource không có owner = ai deploy, ai chịu trách nhiệm?
+#
+# Đây là ví dụ custom policy — bạn tự viết Rego theo yêu cầu của team
+# =============================================================================
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredlabels
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredLabels
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            # Tham số: danh sách label bắt buộc — truyền từ Constraint
+            labels:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredlabels
+
+        violation[{"msg": msg}] {
+          # Lấy set label thực tế của resource
+          provided := {label | input.review.object.metadata.labels[label]}
+
+          # Lấy set label bắt buộc từ Constraint parameters
+          required := {label | label := input.parameters.labels[_]}
+
+          # Tìm label nào bị thiếu
+          missing := required - provided
+
+          # Chỉ vi phạm nếu thiếu ít nhất 1 label
+          count(missing) > 0
+
+          msg := sprintf(
+            "Resource '%v' thiếu label bắt buộc: %v. Thêm vào metadata.labels.",
+            [input.review.object.metadata.name, missing]
+          )
+        }

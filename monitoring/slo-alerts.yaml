@@ -1,0 +1,173 @@
+# =============================================================================
+# slo-alerts.yaml — PrometheusRule: SLO + Multi-window burn rate alerts
+#
+# Triết lý alert từ tài liệu W9 chiều:
+#   - Đừng alert "error > 0.5%" → quá nhạy (false positive) hoặc quá chậm
+#   - Dùng BURN RATE: đang tiêu error budget nhanh cỡ nào?
+#
+# SLO của hệ thống:
+#   api-gateway: success_rate >= 99.5% trong 30 ngày
+#   Error budget: 0.5% × 43200 phút = 216 phút/tháng
+#
+# Multi-window alert (2 cửa sổ):
+#   FAST  (1h × 5min):  burn_rate > 14.4 → cháy hết budget trong 2 ngày → CRITICAL
+#   SLOW  (6h × 30min): burn_rate > 6    → cháy hết budget trong 5 ngày → WARNING
+#
+# Công thức burn rate:
+#   error_rate_hiện_tại / error_budget_rate
+#   VD: lỗi 7.2% / 0.5% = burn rate 14.4 → cháy trong 30/14.4 ≈ 2.08 ngày
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: slo-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack    # để Prometheus operator nhận
+    app: devopslab-slo
+spec:
+  groups:
+    # -----------------------------------------------------------------------
+    # Group 1: SLI recording rules
+    # Tính sẵn các SLI vào recording rule để query nhanh hơn
+    # Recording rule chạy mỗi 1 phút, lưu kết quả vào time-series mới
+    # -----------------------------------------------------------------------
+    - name: sli.recording
+      interval: 1m
+      rules:
+        # SLI: tỉ lệ request thành công của api-gateway (1 phút)
+        - record: job:flask_http_success_rate:rate1m
+          expr: |
+            sum(rate(flask_http_request_total{job="api-gateway", namespace="demo", status!~"5.."}[1m]))
+            /
+            sum(rate(flask_http_request_total{job="api-gateway", namespace="demo"}[1m]))
+
+        # SLI: tỉ lệ lỗi (1 - success_rate) — dùng cho burn rate
+        - record: job:flask_http_error_rate:rate1m
+          expr: |
+            1 - job:flask_http_success_rate:rate1m
+
+        # SLI: latency p95 (5 phút)
+        - record: job:flask_http_latency_p95:rate5m
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(flask_http_request_duration_seconds_bucket{
+                job="api-gateway", namespace="demo"
+              }[5m])) by (le)
+            )
+
+    # -----------------------------------------------------------------------
+    # Group 2: Burn Rate Alerts (Multi-window)
+    # -----------------------------------------------------------------------
+    - name: slo.burn-rate
+      rules:
+        # -------------------------------------------------------------------
+        # CRITICAL — Fast burn (1h window + 5min short window)
+        # Burn rate > 14.4 → cháy hết budget 30 ngày trong ~2 ngày
+        # Alert ngay lập tức, page on-call
+        # -------------------------------------------------------------------
+        - alert: ApiGatewayHighErrorBudgetBurn
+          expr: |
+            (
+              sum(rate(flask_http_request_total{job="api-gateway", namespace="demo", status=~"5.."}[1h]))
+              /
+              sum(rate(flask_http_request_total{job="api-gateway", namespace="demo"}[1h]))
+            ) / 0.005 > 14.4
+            AND
+            (
+              sum(rate(flask_http_request_total{job="api-gateway", namespace="demo", status=~"5.."}[5m]))
+              /
+              sum(rate(flask_http_request_total{job="api-gateway", namespace="demo"}[5m]))
+            ) / 0.005 > 14.4
+          # for: 2m → phải burn rate cao liên tục 2 phút mới alert (giảm flapping)
+          for: 2m
+          labels:
+            severity: critical
+            slo: api-gateway-availability
+            team: platform
+          annotations:
+            summary: "API Gateway đang đốt error budget cực nhanh"
+            description: |
+              Burn rate hiện tại {{ $value | humanizePercentage }} lần SLO.
+              Với tốc độ này, error budget 30 ngày sẽ cạn trong khoảng 2 ngày.
+              Kiểm tra: kubectl logs -l app=api-gateway -n demo --tail=50
+            runbook_url: "https://github.com/huypp/devopslab/blob/main/runbooks/api-gateway-high-error-rate.md"
+
+        # -------------------------------------------------------------------
+        # WARNING — Slow burn (6h window + 30min short window)
+        # Burn rate > 6 → cháy hết budget trong ~5 ngày
+        # Cảnh báo sớm, không cần page on-call ngay
+        # -------------------------------------------------------------------
+        - alert: ApiGatewayMediumErrorBudgetBurn
+          expr: |
+            (
+              sum(rate(flask_http_request_total{job="api-gateway", namespace="demo", status=~"5.."}[6h]))
+              /
+              sum(rate(flask_http_request_total{job="api-gateway", namespace="demo"}[6h]))
+            ) / 0.005 > 6
+            AND
+            (
+              sum(rate(flask_http_request_total{job="api-gateway", namespace="demo", status=~"5.."}[30m]))
+              /
+              sum(rate(flask_http_request_total{job="api-gateway", namespace="demo"}[30m]))
+            ) / 0.005 > 6
+          for: 15m
+          labels:
+            severity: warning
+            slo: api-gateway-availability
+            team: platform
+          annotations:
+            summary: "API Gateway đang rò rỉ error budget (slow burn)"
+            description: |
+              Burn rate 6h = {{ $value | humanizePercentage }} lần SLO.
+              Cần điều tra trong ca làm việc để tránh vi phạm SLO cuối tháng.
+
+        # -------------------------------------------------------------------
+        # WARNING — Latency SLO vi phạm
+        # p95 latency > 500ms trong 10 phút
+        # -------------------------------------------------------------------
+        - alert: ApiGatewayHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(flask_http_request_duration_seconds_bucket{
+                job="api-gateway", namespace="demo"
+              }[5m])) by (le)
+            ) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+            slo: api-gateway-latency
+            team: platform
+          annotations:
+            summary: "API Gateway p95 latency vượt SLO 500ms"
+            description: "p95 latency hiện tại {{ $value | humanizeDuration }}. SLO = 500ms."
+
+    # -----------------------------------------------------------------------
+    # Group 3: Infrastructure alerts (không liên quan SLO, nhưng hữu ích)
+    # -----------------------------------------------------------------------
+    - name: infra.alerts
+      rules:
+        # Pod restart nhiều — app đang crash loop
+        - alert: PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="demo"}[15m]) > 3
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Pod {{ $labels.pod }} đang crash loop"
+            description: "Restart {{ $value }} lần trong 15 phút. Container: {{ $labels.container }}"
+
+        # Deployment không đủ replica
+        - alert: DeploymentReplicasMismatch
+          expr: |
+            kube_deployment_spec_replicas{namespace="demo"}
+            != kube_deployment_status_available_replicas{namespace="demo"}
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Deployment {{ $labels.deployment }} thiếu replica"
+            description: "Mong muốn {{ $value }} replica nhưng không đủ available."

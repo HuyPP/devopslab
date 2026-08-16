@@ -1,0 +1,27 @@
+# =============================================================================
+# platform.yaml — Application chính của hệ thống e-commerce
+#
+# Trỏ tới thư mục k8s/ chứa: namespaces, configmaps, deployments, services
+# ArgoCD sync theo đúng thứ tự sync-wave đã khai báo trong từng file.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/huypp/devopslab.git
+    targetRevision: main
+    path: k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true   # tránh lỗi "annotation too long" với CRD lớn

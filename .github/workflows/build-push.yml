@@ -1,0 +1,431 @@
+# =============================================================================
+# build-push.yml — CI Pipeline chính (chạy khi merge vào main)
+#
+# Luồng đầy đủ:
+#
+#   [PR]  pr-checks.yml     → validate + lint + test (gác cổng)
+#   [Merge vào main]
+#         ↓
+#   Job 1: validate         → kubeconform (YAML syntax)
+#         ↓
+#   Job 2: build (matrix)   → docker buildx (3 service song song, cache GHA)
+#         ↓
+#   Job 3: scan  (matrix)   → Trivy CVE HIGH/CRITICAL, fail nếu có
+#         ↓
+#   Job 4: push  (matrix)   → ghcr.io với tag: sha + semver
+#         ↓
+#   Job 5: update-manifest  → sed image tag → git commit [skip ci] → push
+#         ↓
+#   ArgoCD detect commit mới → sync → Argo Rollouts canary
+#
+# Nguyên tắc CI/CD tách bạch (W9):
+#   - CI: validate, build, scan, push — KHÔNG deploy
+#   - CD: ArgoCD tự kéo — KHÔNG có kubectl trong CI
+#
+# Secrets cần thiết (GitHub → Settings → Secrets and variables → Actions):
+#   GITHUB_TOKEN: tự động có, dùng để push ghcr.io + commit manifest
+#   (Không cần tạo thêm secret nào khác)
+# =============================================================================
+name: CI — Build · Scan · Push · Update Manifest
+
+on:
+  push:
+    branches: [main]
+    # Trigger khi sửa service code hoặc Dockerfile
+    paths:
+      - "services/**"
+      - ".github/workflows/build-push.yml"
+  # Cho phép chạy tay từ GitHub UI (debug)
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Build service cụ thể (để trống = build cả 3)"
+        required: false
+        default: ""
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: validate
+  # Chạy lại validate dù PR đã chạy — đảm bảo manifest không bị sửa sau PR merge
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSLo kc.tgz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf kc.tgz && sudo mv kubeconform /usr/local/bin/
+
+      - name: Validate all manifests
+        run: |
+          kubeconform -strict -summary -ignore-missing-schemas \
+            k8s/ argocd/ rbac/ k8s-rollouts/ monitoring/ gatekeeper/
+          echo "✅ All manifests valid"
+
+  # ---------------------------------------------------------------------------
+  # Job 2: build
+  # Build 3 image song song dùng matrix strategy.
+  # Dùng workflow_dispatch input để build 1 service cụ thể khi debug.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: validate
+    strategy:
+      # fail-fast: false → build service khác tiếp tục kể cả khi 1 service fail
+      # Giúp biết tất cả service nào bị lỗi trong 1 run
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - order-service
+          - product-service
+        # Nếu workflow_dispatch với service cụ thể → chỉ build service đó
+        # (GitHub Actions không hỗ trợ dynamic matrix natively,
+        #  workaround dùng if condition bên dưới)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip if not selected service
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.service != '' &&
+          github.event.inputs.service != matrix.service
+        run: |
+          echo "Skipping ${{ matrix.service }} (selected: ${{ github.event.inputs.service }})"
+          exit 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Tính image tag từ git SHA — immutable, traceable
+      - name: Compute image tag
+        id: tag
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "full_tag=${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          push: false
+          tags: ${{ steps.tag.outputs.full_tag }}
+          # GHA cache: tái dùng layer giữa các run → build nhanh hơn ~60%
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          # Export tar để Trivy scan trong job tiếp theo
+          outputs: type=docker,dest=/tmp/${{ matrix.service }}.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.service }}
+          path: /tmp/${{ matrix.service }}.tar
+          retention-days: 1          # chỉ cần giữ cho job scan dùng
+
+      # In build summary vào GitHub Actions job summary
+      - name: Build summary
+        run: |
+          echo "## Build: ${{ matrix.service }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${{ steps.tag.outputs.full_tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Git SHA**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Job 3: scan — Trivy CVE scan
+  #
+  # Trivy scan tìm CVE trong:
+  #   - OS packages (debian/alpine packages trong image)
+  #   - Application dependencies (pip packages từ requirements.txt)
+  #
+  # exit-code: 1 → CI fail nếu có CVE HIGH/CRITICAL có fix
+  # ignore-unfixed: true → bỏ qua CVE chưa có patch (vendor chưa ra bản vá)
+  #   Trong thực tế: ghi exception ADR với thời hạn review (vd: 30 ngày)
+  # ---------------------------------------------------------------------------
+  scan:
+    name: Trivy Scan — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - order-service
+          - product-service
+    # Cần permission để upload SARIF lên GitHub Security tab
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.service }}
+          path: /tmp
+
+      - name: Load image into Docker daemon
+        run: docker load -i /tmp/${{ matrix.service }}.tar
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "full_tag=${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      # Scan lần 1: in ra bảng để đọc trong log
+      - name: Trivy scan — table output (human readable)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.tag.outputs.full_tag }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 0              # lần này không fail, chỉ để xem
+          ignore-unfixed: true
+
+      # Scan lần 2: SARIF format để upload lên GitHub Security tab
+      - name: Trivy scan — SARIF output (GitHub Security)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.tag.outputs.full_tag }}
+          format: sarif
+          output: trivy-${{ matrix.service }}.sarif
+          severity: HIGH,CRITICAL
+          exit-code: 0              # lần này cũng không fail, chỉ collect
+          ignore-unfixed: true
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-${{ matrix.service }}.sarif
+          category: trivy-${{ matrix.service }}
+
+      # Scan lần 3: thật sự fail CI nếu có CVE HIGH/CRITICAL có fix
+      - name: Trivy scan — enforcement (fail on CVE)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.tag.outputs.full_tag }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 1              # ← fail CI nếu có CVE
+          ignore-unfixed: true      # ← bỏ qua CVE chưa có patch
+
+      - name: Scan summary
+        if: always()
+        run: |
+          echo "## Trivy Scan: ${{ matrix.service }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Severity: HIGH, CRITICAL" >> $GITHUB_STEP_SUMMARY
+          echo "- Unfixed CVEs: ignored" >> $GITHUB_STEP_SUMMARY
+          echo "- SARIF report: uploaded to Security tab" >> $GITHUB_STEP_SUMMARY
+
+  # ---------------------------------------------------------------------------
+  # Job 4: push — Push image lên ghcr.io
+  # Chỉ chạy khi tất cả scan pass VÀ đang ở branch main
+  # ---------------------------------------------------------------------------
+  push:
+    name: Push — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: [validate, scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write        # cần để push lên ghcr.io
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - order-service
+          - product-service
+    outputs:
+      # Output image tag để job update-manifest dùng
+      # (chỉ output được từ non-matrix job; workaround: dùng artifact)
+      short_sha: ${{ steps.tag.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN tự động có — không cần tạo secret thủ công
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute tags
+        id: tag
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "sha_tag=${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      # Dùng docker/metadata-action để generate tags chuẩn:
+      #   sha-<7 ký tự>  → immutable, dùng cho K8s manifest
+      #   main           → floating, tiện khi test
+      #   v1.2.3         → nếu push git tag
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Push summary
+        run: |
+          echo "## Pushed: ${{ matrix.service }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tags**:" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" | while read tag; do
+            echo "  - \`$tag\`" >> $GITHUB_STEP_SUMMARY
+          done
+
+      # Lưu short_sha ra artifact để job update-manifest đọc được
+      - name: Save SHA artifact
+        run: echo "${{ steps.tag.outputs.short_sha }}" > /tmp/short_sha.txt
+
+      - name: Upload SHA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha-${{ matrix.service }}
+          path: /tmp/short_sha.txt
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Job 5: update-manifest
+  # Sau khi push image thành công → tự động cập nhật image tag trong YAML
+  # ArgoCD detect commit mới → sync → Argo Rollouts canary bắt đầu
+  #
+  # Đây là "trigger" cho CD: CI viết vào Git → ArgoCD đọc từ Git
+  # Không có kubectl apply nào trong CI!
+  # ---------------------------------------------------------------------------
+  update-manifest:
+    name: Update K8s Manifests
+    runs-on: ubuntu-latest
+    needs: push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write        # cần để git push
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Checkout với token có quyền push
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Fetch toàn bộ history để git log hoạt động
+          fetch-depth: 0
+
+      - name: Download SHA artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sha-*
+          path: /tmp/sha-artifacts
+          merge-multiple: true
+
+      - name: Compute short SHA
+        id: sha
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "value=${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      # Cập nhật image tag cho TẤT CẢ 3 service trong deployments.yaml
+      - name: Update image tags in k8s/deployments.yaml
+        run: |
+          SHORT_SHA="${{ steps.sha.outputs.value }}"
+          OWNER="${{ github.repository_owner }}"
+
+          echo "── Updating image tags to: ${SHORT_SHA} ──"
+
+          # api-gateway
+          sed -i "s|image: ghcr.io/${OWNER}/api-gateway:.*|image: ghcr.io/${OWNER}/api-gateway:${SHORT_SHA}|g" \
+            k8s/deployments.yaml
+
+          # order-service
+          sed -i "s|image: ghcr.io/${OWNER}/order-service:.*|image: ghcr.io/${OWNER}/order-service:${SHORT_SHA}|g" \
+            k8s/deployments.yaml
+
+          # product-service
+          sed -i "s|image: ghcr.io/${OWNER}/product-service:.*|image: ghcr.io/${OWNER}/product-service:${SHORT_SHA}|g" \
+            k8s/deployments.yaml
+
+          echo "── Updated k8s/deployments.yaml ──"
+          grep "image:" k8s/deployments.yaml
+
+      # Cập nhật image tag trong Rollout (canary) của api-gateway
+      - name: Update image tag in k8s-rollouts/rollout-api-gateway.yaml
+        run: |
+          SHORT_SHA="${{ steps.sha.outputs.value }}"
+          OWNER="${{ github.repository_owner }}"
+
+          sed -i "s|image: ghcr.io/${OWNER}/api-gateway:.*|image: ghcr.io/${OWNER}/api-gateway:${SHORT_SHA}|g" \
+            k8s-rollouts/rollout-api-gateway.yaml
+
+          echo "── Updated rollout-api-gateway.yaml ──"
+          grep "image:" k8s-rollouts/rollout-api-gateway.yaml
+
+      - name: Commit and push manifest updates
+        run: |
+          SHORT_SHA="${{ steps.sha.outputs.value }}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add k8s/deployments.yaml k8s-rollouts/rollout-api-gateway.yaml
+
+          # Chỉ commit nếu thật sự có thay đổi
+          if git diff --staged --quiet; then
+            echo "No manifest changes to commit"
+          else
+            git commit -m "ci: update image tags to ${SHORT_SHA}
+
+Services updated:
+  - api-gateway:${SHORT_SHA}
+  - order-service:${SHORT_SHA}
+  - product-service:${SHORT_SHA}
+
+Triggered by: ${{ github.actor }}
+Commit: ${{ github.sha }}
+
+[skip ci]"
+            git push
+
+            echo "✅ Manifest updated — ArgoCD will detect and deploy"
+          fi
+
+      - name: Manifest update summary
+        run: |
+          SHORT_SHA="${{ steps.sha.outputs.value }}"
+          echo "## Manifest Update" >> $GITHUB_STEP_SUMMARY
+          echo "- **New image tag**: \`${SHORT_SHA}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Files updated**:" >> $GITHUB_STEP_SUMMARY
+          echo "  - \`k8s/deployments.yaml\`" >> $GITHUB_STEP_SUMMARY
+          echo "  - \`k8s-rollouts/rollout-api-gateway.yaml\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Next**: ArgoCD detects commit → syncs → Rollout starts canary" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,232 @@
+# =============================================================================
+# deployments.yaml — sync-wave: "1"
+#
+# Điểm học tập trong file này:
+#   1. resources.limits + requests  → bắt buộc bởi Gatekeeper constraint F-02
+#   2. readinessProbe / livenessProbe → K8s biết pod đã sẵn sàng nhận traffic
+#   3. securityContext.runAsUser: 1000 → non-root, Gatekeeper constraint F-04
+#   4. image tag pin version (không dùng :latest) → Gatekeeper constraint F-01
+#   5. label "owner" → Gatekeeper constraint custom (W10 Lab 1.3)
+#   6. envFrom configMapRef → tách config khỏi image (12-factor)
+#
+# THAY huypp bằng GitHub username của bạn trước khi dùng
+# =============================================================================
+
+# ---------------- api-gateway ----------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: api-gateway
+    owner: team-platform          # bắt buộc bởi Gatekeeper
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-gateway
+  # Rolling update: thay thế pod cũ dần dần, không downtime
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # tạo thêm 1 pod mới trước khi xóa pod cũ
+      maxUnavailable: 0  # không để pod nào unavailable trong lúc update
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+        version: v1
+    spec:
+      # non-root user — user id 1000 khớp với appuser trong Dockerfile
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: api-gateway
+          # Pin exact version — đổi tag này khi release bản mới
+          # CI sẽ tự build và push image lên ghcr.io
+          image: ghcr.io/huypp/api-gateway:v1
+          imagePullPolicy: IfNotPresent   # minikube: không cần pull từ registry
+          ports:
+            - name: http
+              containerPort: 8080
+          # Đọc toàn bộ config từ ConfigMap — không hardcode trong image
+          envFrom:
+            - configMapRef:
+                name: api-gateway-config
+          # readinessProbe: Pod chỉ nhận traffic khi /healthz trả 200
+          # Trong rolling update: K8s chờ pod mới "ready" rồi mới xóa pod cũ
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          # livenessProbe: K8s restart pod nếu app bị treo (deadlock, OOM, v.v.)
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          # resources — bắt buộc bởi Gatekeeper constraint F-02
+          # requests: K8s scheduler dùng để chọn node
+          # limits: K8s OOMKill pod nếu vượt memory limit
+          resources:
+            requests:
+              cpu: "50m"       # 0.05 CPU core
+              memory: "64Mi"
+            limits:
+              cpu: "200m"      # 0.2 CPU core
+              memory: "128Mi"
+          # securityContext container-level
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# ---------------- order-service ----------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: order-service
+    owner: team-platform
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: order-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: order-service
+        version: v1
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: order-service
+          image: ghcr.io/huypp/order-service:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: order-service-config
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# ---------------- product-service ----------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: product-service
+    owner: team-platform
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: product-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: product-service
+        version: v1
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: product-service
+          image: ghcr.io/huypp/product-service:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8082
+          envFrom:
+            - configMapRef:
+                name: product-service-config
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8082
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8082
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

@@ -1,0 +1,64 @@
+# bad-pods.yaml — Các pod vi phạm từng constraint
+# Mỗi pod phải bị REJECT khi apply
+# kubectl apply -f gatekeeper/test/bad-pods.yaml → phải thấy lỗi từ admission webhook
+
+---
+# 1. Vi phạm F-01: dùng :latest tag
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-pod-latest
+  namespace: demo
+spec:
+  containers:
+    - name: app
+      image: nginx:latest     # ❌ tag :latest → reject
+      resources:
+        limits: { cpu: "100m", memory: "64Mi" }
+  securityContext:
+    runAsUser: 1000
+---
+# 2. Vi phạm F-02: không có resource limits
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-pod-no-limits
+  namespace: demo
+spec:
+  containers:
+    - name: app
+      image: nginx:1.27.0
+      # ❌ không có resources.limits → reject
+  securityContext:
+    runAsUser: 1000
+---
+# 3. Vi phạm F-04: chạy root
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-pod-root
+  namespace: demo
+spec:
+  securityContext:
+    runAsUser: 0              # ❌ root user → reject
+  containers:
+    - name: app
+      image: nginx:1.27.0
+      resources:
+        limits: { cpu: "100m", memory: "64Mi" }
+---
+# 4. Vi phạm: hostNetwork
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-pod-hostnetwork
+  namespace: demo
+spec:
+  hostNetwork: true           # ❌ hostNetwork → reject
+  containers:
+    - name: app
+      image: nginx:1.27.0
+      resources:
+        limits: { cpu: "100m", memory: "64Mi" }
+  securityContext:
+    runAsUser: 1000

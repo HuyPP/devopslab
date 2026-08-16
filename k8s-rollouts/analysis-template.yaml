@@ -1,0 +1,89 @@
+# =============================================================================
+# analysis-template.yaml — "luật tự chấm" cho canary
+#
+# AnalysisTemplate định nghĩa TIÊU CHÍ để Argo Rollouts quyết định:
+#   - Canary khỏe → tiếp tục promote lên % cao hơn
+#   - Canary tệ  → tự abort, rollback về stable version
+#
+# Cách hoạt động:
+#   1. Rollout bước setWeight: 10 → 10% traffic sang bản mới
+#   2. AnalysisRun chạy nền, query Prometheus mỗi 30s
+#   3. Nếu success-rate < 0.95 liên tiếp 3 lần → ABORT
+#   4. Nếu latency p95 > 500ms liên tiếp 3 lần → ABORT
+#   5. Nếu cả 2 metric đều pass → Rollout promote tự động
+#
+# Đây chính là phần nối W9 chiều (SLO/burn rate) với Canary:
+#   canary dùng chính SLO metric để quyết promote hay abort
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: api-gateway-slo
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  # args: tham số truyền vào từ Rollout — giúp tái sử dụng template cho nhiều service
+  args:
+    - name: service-name
+      value: api-gateway
+
+  metrics:
+    # ------------------------------------------------------------------
+    # Metric 1: Success Rate (SLI chính)
+    # SLO: >= 95% request thành công trong cửa sổ 2 phút
+    # Query: tỉ lệ request KHÔNG phải 5xx / tổng request
+    # ------------------------------------------------------------------
+    - name: success-rate
+      # Chạy analysis mỗi 30 giây
+      interval: 30s
+      # Điều kiện PASS: >= 95% thành công
+      successCondition: result[0] >= 0.95
+      # Điều kiện FAIL: < 90% (fail nặng → abort ngay, không đợi failureLimit)
+      failureCondition: result[0] < 0.90
+      # Tệ 3 lần liên tiếp mới abort (tránh false positive từ spike nhỏ)
+      failureLimit: 3
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+          # PromQL: tỉ lệ request thành công của api-gateway trong 2 phút gần nhất
+          # flask_http_request_total là metric tự động từ prometheus_flask_exporter
+          query: |
+            sum(rate(
+              flask_http_request_total{
+                namespace="demo",
+                job="api-gateway",
+                status!~"5.."
+              }[2m]
+            ))
+            /
+            sum(rate(
+              flask_http_request_total{
+                namespace="demo",
+                job="api-gateway"
+              }[2m]
+            ))
+
+    # ------------------------------------------------------------------
+    # Metric 2: Latency P95 (SLO phụ)
+    # SLO: p95 latency < 500ms
+    # Query: histogram quantile của flask request duration
+    # ------------------------------------------------------------------
+    - name: latency-p95
+      interval: 30s
+      # Đơn vị giây — 0.5s = 500ms
+      successCondition: result[0] < 0.5
+      failureCondition: result[0] > 1.0
+      failureLimit: 3
+      provider:
+        prometheus:
+          address: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+          query: |
+            histogram_quantile(0.95,
+              sum(rate(
+                flask_http_request_duration_seconds_bucket{
+                  namespace="demo",
+                  job="api-gateway"
+                }[2m]
+              )) by (le)
+            )

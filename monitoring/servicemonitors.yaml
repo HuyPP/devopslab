@@ -1,0 +1,88 @@
+# =============================================================================
+# servicemonitors.yaml — Báo Prometheus scrape /metrics của 3 service
+#
+# ServiceMonitor là CRD của kube-prometheus-stack.
+# Prometheus operator đọc ServiceMonitor → tự cấu hình scrape job.
+# Bạn không cần sửa prometheus.yml tay.
+#
+# Flow:
+#   ServiceMonitor selector: app=api-gateway
+#     → tìm Service có label app=api-gateway trong namespace demo
+#     → scrape endpoint port "http" tại path /metrics mỗi 15s
+#     → lưu vào Prometheus với label job="api-gateway", namespace="demo"
+#
+# Prometheus query dùng: flask_http_request_total{job="api-gateway", namespace="demo"}
+# =============================================================================
+
+# ---------------- api-gateway ----------------
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: api-gateway
+  namespace: monitoring       # ServiceMonitor sống ở ns monitoring
+  labels:
+    # Label này để Prometheus operator nhận ra (nếu dùng selectorNilUsesHelmValues=true)
+    release: kube-prometheus-stack
+spec:
+  # namespaceSelector: scrape service ở namespace demo
+  namespaceSelector:
+    matchNames:
+      - demo
+  # selector: tìm Service có label app=api-gateway
+  selector:
+    matchLabels:
+      app: api-gateway
+  endpoints:
+    - port: http              # tên port trong Service spec
+      path: /metrics
+      interval: 15s
+      # Thêm label "service" vào mỗi metric để dễ query
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_service_name]
+          targetLabel: service
+---
+# ---------------- order-service ----------------
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: order-service
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - demo
+  selector:
+    matchLabels:
+      app: order-service
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_service_name]
+          targetLabel: service
+---
+# ---------------- product-service ----------------
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: product-service
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - demo
+  selector:
+    matchLabels:
+      app: product-service
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_service_name]
+          targetLabel: service

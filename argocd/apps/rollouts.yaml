@@ -1,0 +1,25 @@
+# =============================================================================
+# rollouts.yaml — Argo Rollout canary configs cho api-gateway
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rollouts-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # sau argo-rollouts controller
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/huypp/devopslab.git
+    targetRevision: main
+    path: k8s-rollouts
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

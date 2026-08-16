@@ -1,0 +1,113 @@
+# =============================================================================
+# rollout-api-gateway.yaml — Canary Rollout cho api-gateway
+#
+# Rollout thay thế Deployment cho api-gateway.
+# Khi đổi image tag trong file này + git push → ArgoCD sync →
+# Argo Rollouts bắt đầu quy trình canary tự động.
+#
+# Kịch bản "Good run" (bản mới tốt):
+#   10% traffic → AnalysisRun check OK → 25% → OK → 50% → OK → 100%
+#   Tổng thời gian ~10 phút (2 phút × 3 bước pause + analysis time)
+#
+# Kịch bản "Bad run" (bản mới lỗi — ERROR_RATE > 0.05):
+#   10% traffic → AnalysisRun phát hiện success-rate < 95% →
+#   Fail 3 lần → ABORT → rollback về stable version
+#   Chỉ 10% user từng gặp lỗi, < 3 phút đã rollback
+#
+# Demo canary:
+#   1. Đổi VERSION "v1" → "v2" + ERROR_RATE "0" → "0.3" (30% lỗi)
+#   2. git commit -am "feat: api-gateway v2 (buggy)" && git push
+#   3. kubectl argo rollouts get rollout api-gateway -n demo --watch
+#   4. Quan sát: AnalysisRun FAILED → Rollout ABORTED → stable v1 restored
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: api-gateway
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: api-gateway
+    owner: team-platform
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+        version: v1
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: api-gateway
+          # ← ĐỔI TAG NÀY để trigger canary: v1 → v2
+          image: ghcr.io/huypp/api-gateway:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: api-gateway-config
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+  strategy:
+    canary:
+      # canaryService/stableService: Rollout tạo 2 Service riêng
+      # canaryService nhận traffic % canary, stableService nhận phần còn lại
+      canaryService: api-gateway-canary
+      stableService: api-gateway-stable
+
+      steps:
+        # Bước 1: Thả 10% traffic sang bản mới
+        - setWeight: 10
+        # Bước 1b: Chạy AnalysisRun — nếu fail → abort ngay ở 10%
+        - analysis:
+            templates:
+              - templateName: api-gateway-slo
+        # Bước 2: Tăng lên 25%, pause 2 phút để analysis chạy thêm
+        - setWeight: 25
+        - pause:
+            duration: 2m
+        # Bước 3: Tăng lên 50%
+        - setWeight: 50
+        - pause:
+            duration: 2m
+        # Bước 4: Tăng lên 100% — promote xong
+        - setWeight: 100
+
+      # Anti-affinity: pod canary và stable không nằm cùng node
+      # → tránh 1 node chết làm cả 2 nhóm bị ảnh hưởng
+      antiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution: {}

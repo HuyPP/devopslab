@@ -1,0 +1,42 @@
+# =============================================================================
+# no-host-network.yaml — ConstraintTemplate (W10 Lab 1.2 rule 4)
+#
+# Cấm pod dùng hostNetwork: true
+#
+# Tại sao?
+#   - hostNetwork=true → pod dùng network stack của NODE (không phải pod network)
+#   - Pod thấy tất cả traffic trên node → có thể sniff credential, token
+#   - Lateral movement: từ 1 pod có thể scan toàn bộ node network
+#   - Chỉ các DaemonSet hệ thống (CNI, kube-proxy) mới cần hostNetwork
+# =============================================================================
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8snohostnetwork
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sNoHostNetwork
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8snohostnetwork
+
+        violation[{"msg": msg}] {
+          input.review.object.spec.hostNetwork == true
+          msg := "hostNetwork: true bị cấm. Pod không được dùng network stack của node."
+        }
+
+        # Cũng chặn hostPID và hostIPC — cùng vấn đề bảo mật
+        violation[{"msg": msg}] {
+          input.review.object.spec.hostPID == true
+          msg := "hostPID: true bị cấm. Pod không được share PID namespace với node."
+        }
+
+        violation[{"msg": msg}] {
+          input.review.object.spec.hostIPC == true
+          msg := "hostIPC: true bị cấm. Pod không được share IPC namespace với node."
+        }

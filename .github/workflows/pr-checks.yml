@@ -1,0 +1,153 @@
+# =============================================================================
+# pr-checks.yml — Gác cổng trên mọi Pull Request
+#
+# Nguyên tắc "plan-on-PR / apply-on-merge" (W9):
+#   PR  → chỉ validate + lint + test (KHÔNG build image, KHÔNG deploy)
+#   Main → build + scan + push + ArgoCD deploy
+#
+# Branch Protection cần bật (GitHub → Settings → Branches → main):
+#   ✔ Require pull request before merging
+#   ✔ Require status checks: "validate-manifests", "lint-and-test"
+#   ✔ Require branches to be up to date
+#   ✔ Include administrators (admin cũng không bypass)
+#
+# Vì sao tách file riêng thay vì dùng if: trong build-push.yml?
+#   - PR check chạy nhanh (~1 phút), không cần build image (~5 phút)
+#   - Status check name phải stable — nếu dùng chung file thì job name thay đổi
+#     theo matrix sẽ làm Branch Protection không nhận ra
+# =============================================================================
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main]
+    # Chỉ chạy khi các file này thay đổi — tránh chạy thừa
+    paths:
+      - "services/**"
+      - "k8s/**"
+      - "argocd/**"
+      - "rbac/**"
+      - "gatekeeper/**"
+      - "monitoring/**"
+      - "k8s-rollouts/**"
+      - ".github/workflows/**"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: validate-manifests — Kiểm tra YAML K8s hợp lệ
+  # Tên job này phải khớp chính xác trong Branch Protection setting
+  # ---------------------------------------------------------------------------
+  validate-manifests:
+    name: validate-manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSLo kc.tgz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf kc.tgz && sudo mv kubeconform /usr/local/bin/
+          kubeconform -v
+
+      - name: Validate K8s core manifests (k8s/, rbac/)
+        run: |
+          echo "── k8s/ ──────────────────────────────"
+          kubeconform -strict -summary -ignore-missing-schemas k8s/
+          echo "── rbac/ ─────────────────────────────"
+          kubeconform -strict -summary rbac/
+
+      - name: Validate CRD-based manifests (ArgoCD, Rollouts, Monitoring)
+        run: |
+          echo "── argocd/ ───────────────────────────"
+          kubeconform -strict -summary -ignore-missing-schemas argocd/
+          echo "── k8s-rollouts/ ─────────────────────"
+          kubeconform -strict -summary -ignore-missing-schemas k8s-rollouts/
+          echo "── monitoring/ ───────────────────────"
+          kubeconform -strict -summary -ignore-missing-schemas monitoring/
+          echo "── gatekeeper/ ───────────────────────"
+          kubeconform -strict -summary -ignore-missing-schemas gatekeeper/
+
+      # Kiểm tra không có placeholder chưa thay
+      - name: Check no placeholder left in manifests
+        run: |
+          echo "── Checking for <YOUR_GITHUB_USER> placeholder ──"
+          if grep -rn "<YOUR_GITHUB_USER>" k8s/ argocd/ k8s-rollouts/ 2>/dev/null; then
+            echo "❌ Vẫn còn placeholder <YOUR_GITHUB_USER>. Thay bằng username thật trước khi merge."
+            exit 1
+          fi
+          echo "✅ Không còn placeholder"
+
+  # ---------------------------------------------------------------------------
+  # Job 2: lint-and-test — Lint Python + chạy unit test
+  # Tên job này cũng cần có trong Branch Protection
+  # ---------------------------------------------------------------------------
+  lint-and-test:
+    name: lint-and-test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [api-gateway, order-service, product-service]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # Cache pip để lần sau không cần download lại
+          cache: pip
+          cache-dependency-path: services/${{ matrix.service }}/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r services/${{ matrix.service }}/requirements.txt
+          # Thêm các tool kiểm tra code quality
+          pip install flake8==7.1.1 pytest==8.3.3
+
+      - name: Lint với flake8
+        run: |
+          # E501: dòng dài > 79 ký tự — bỏ qua (comment dài không phải bug)
+          # W503: line break before binary operator — style preference
+          flake8 services/${{ matrix.service }}/app.py \
+            --max-line-length=120 \
+            --ignore=W503 \
+            --statistics
+        # continue-on-error: true  ← bỏ comment này nếu muốn block PR khi lint lỗi
+
+      - name: Run unit tests
+        # Chạy test từ thư mục tests/ nếu có
+        # Nếu chưa có tests → skip gracefully (không fail CI)
+        run: |
+          TEST_DIR="services/${{ matrix.service }}/tests"
+          if [ -d "$TEST_DIR" ]; then
+            echo "── Running tests for ${{ matrix.service }} ──"
+            cd services/${{ matrix.service }}
+            python -m pytest tests/ -v --tb=short
+          else
+            echo "⚠️  Chưa có tests/ cho ${{ matrix.service }} — skip"
+            echo "   Tạo services/${{ matrix.service }}/tests/test_app.py để có test coverage"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Job 3: dockerfile-lint — Lint Dockerfile bằng hadolint
+  # Phát hiện Dockerfile anti-patterns: dùng :latest, không có HEALTHCHECK, v.v.
+  # ---------------------------------------------------------------------------
+  dockerfile-lint:
+    name: dockerfile-lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [api-gateway, order-service, product-service]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfile — ${{ matrix.service }}
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: services/${{ matrix.service }}/Dockerfile
+          # DL3008: pin apt-get versions — không áp dụng vì dùng pip
+          # DL3013: pin pip install versions — đã pin trong requirements.txt
+          # SC2086: double quote variables — không có shell script trong Dockerfile này
+          ignore: DL3008,DL3013,SC2086
+          failure-threshold: warning    # fail nếu có warning trở lên

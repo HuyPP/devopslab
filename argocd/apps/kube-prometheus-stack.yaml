@@ -1,0 +1,51 @@
+# =============================================================================
+# kube-prometheus-stack.yaml — Cài Prometheus + Grafana + Alertmanager
+#
+# Dùng Helm chart từ prometheus-community.
+# Cài qua GitOps: thêm file này + push → root tự cài, không kubectl tay.
+#
+# Lưu ý học tập:
+#   - serviceMonitorSelectorNilUsesHelmValues: false
+#     → Prometheus scrape MỌI ServiceMonitor trong cluster
+#       (mặc định chỉ scrape SM có label release: kube-prometheus-stack)
+#   - ServerSideApply=true: CRD của stack này rất lớn (>256KB), dùng SSA
+#     để tránh lỗi "metadata.annotations: Too long"
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: "65.1.1"      # pin version — đừng dùng "*"
+    helm:
+      values: |
+        prometheus:
+          prometheusSpec:
+            # Scrape TẤT CẢ ServiceMonitor, không filter theo label
+            serviceMonitorSelectorNilUsesHelmValues: false
+            # Giữ metrics 15 ngày (default 10)
+            retention: 15d
+        grafana:
+          adminPassword: "devopslab123"  # đổi trong thực tế, dùng Secret
+          service:
+            type: NodePort
+            nodePort: 30030
+        alertmanager:
+          alertmanagerSpec:
+            # Alertmanager config sẽ inject qua Secret riêng
+            configSecret: alertmanager-config
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

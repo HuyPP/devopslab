@@ -1,0 +1,8 @@
+# Không copy các file này vào Docker context
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.env
+*.log
+test_local.sh

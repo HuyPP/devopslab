@@ -1,0 +1,55 @@
+# =============================================================================
+# no-latest-tag.yaml — ConstraintTemplate F-01
+#
+# Cấm image dùng tag :latest hoặc không có tag
+#
+# Tại sao?
+#   - :latest không immutable → deploy 2 lần cùng tag nhưng khác image
+#   - Không biết đang chạy version nào → vi phạm nguyên tắc GitOps "versioned"
+#   - Không rollback được chính xác
+#
+# Rego logic: duyệt qua tất cả container trong pod spec,
+#   nếu image không có tag hoặc tag = "latest" → vi phạm
+# =============================================================================
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8snolatesttag
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # sau gatekeeper controller (wave 0)
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sNoLatestTag
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8snolatesttag
+
+        # Vi phạm nếu bất kỳ container nào dùng :latest hoặc không có tag
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          image := container.image
+
+          # Kiểm tra không có tag (chỉ có registry/name)
+          not contains(image, ":")
+          msg := sprintf("Container '%v' dùng image '%v' không có tag. Phải pin version cụ thể.", [container.name, image])
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          image := container.image
+
+          # Kiểm tra tag = "latest"
+          endswith(image, ":latest")
+          msg := sprintf("Container '%v' dùng image '%v' với tag :latest. Phải dùng tag cụ thể như :v1.2.3.", [container.name, image])
+        }
+
+        # Kiểm tra cả initContainers
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.initContainers[_]
+          image := container.image
+          endswith(image, ":latest")
+          msg := sprintf("initContainer '%v' dùng tag :latest.", [container.name])
+        }

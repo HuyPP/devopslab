@@ -1,0 +1,27 @@
+# =============================================================================
+# monitoring.yaml — ServiceMonitor + SLO Alert rules
+#
+# Quản lý file trong thư mục monitoring/:
+#   - servicemonitors.yaml: báo Prometheus scrape /metrics của 3 service
+#   - slo-alerts.yaml: PrometheusRule định nghĩa SLO + burn rate alert
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # sau kube-prometheus-stack cài xong
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/huypp/devopslab.git
+    targetRevision: main
+    path: monitoring
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

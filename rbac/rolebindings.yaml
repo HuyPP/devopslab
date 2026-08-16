@@ -1,0 +1,54 @@
+# =============================================================================
+# rolebindings.yaml — Gắn role cho user
+#
+# Kiểm tra sau khi apply:
+#   kubectl auth can-i create deploy -n demo --as alice         → yes
+#   kubectl auth can-i create deploy -n kube-system --as alice  → no
+#   kubectl auth can-i get pods -A --as bob                     → yes
+#   kubectl auth can-i delete nodes --as carol                  → no
+#   kubectl auth can-i delete nodes --as bob                    → no
+# =============================================================================
+
+# alice → developer (chỉ trong ns demo)
+# Dùng RoleBinding (không phải ClusterRoleBinding) → giới hạn 1 namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alice-developer
+  namespace: demo
+subjects:
+  - kind: User
+    name: alice
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: developer
+  apiGroup: rbac.authorization.k8s.io
+---
+# bob → sre (toàn cụm)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: bob-sre
+subjects:
+  - kind: User
+    name: bob
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: sre
+  apiGroup: rbac.authorization.k8s.io
+---
+# carol → viewer (toàn cụm)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: carol-viewer
+subjects:
+  - kind: User
+    name: carol
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: viewer
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,49 @@
+# =============================================================================
+# configmaps.yaml — sync-wave: "0"
+#
+# Tại sao tách ConfigMap ra file riêng + wave 0?
+#   Deployment ở wave 1 dùng envFrom để đọc ConfigMap này.
+#   Nếu ConfigMap chưa có khi Deployment khởi động → Pod lỗi
+#   CreateContainerConfigError. Wave đảm bảo ConfigMap trước Deployment.
+#
+# Nguyên tắc 12-factor app: cùng 1 image chạy mọi môi trường,
+#   chỉ đổi ConfigMap — không build lại image.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-gateway-config
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+data:
+  # URL nội bộ K8s: <service-name>.<namespace>.svc.cluster.local
+  # Viết ngắn hơn vì cùng namespace: http://<service-name>:<port>
+  ORDER_SERVICE_URL:   "http://order-service:8081"
+  PRODUCT_SERVICE_URL: "http://product-service:8082"
+  VERSION:             "v1"
+  # ERROR_RATE = 0 → không inject lỗi (môi trường bình thường)
+  # Đổi thành "0.3" để demo SLO burn rate (30% request lỗi)
+  ERROR_RATE:          "0"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-service-config
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+data:
+  VERSION:    "v1"
+  ERROR_RATE: "0"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: product-service-config
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+data:
+  VERSION:    "v1"
+  ERROR_RATE: "0"

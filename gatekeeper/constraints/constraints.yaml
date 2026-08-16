@@ -1,0 +1,106 @@
+# =============================================================================
+# constraints.yaml — 5 Constraint instances (áp policy lên cluster)
+#
+# Mỗi Constraint = 1 instance của ConstraintTemplate, truyền tham số cụ thể.
+#
+# QUAN TRỌNG — thứ tự bật enforce:
+#   1. Đặt enforcementAction: warn TRƯỚC
+#   2. kubectl get k8snolatesttag -o yaml → xem violations
+#   3. Sửa platform manifest cho hợp lệ
+#   4. Đổi sang enforcementAction: deny
+#   Nếu bật deny ngay → platform tự bị chặn!
+#
+# Test sau khi apply:
+#   kubectl apply -f gatekeeper/test/bad-pod-latest-tag.yaml    → bị reject
+#   kubectl apply -f gatekeeper/test/bad-pod-no-limits.yaml     → bị reject
+#   kubectl apply -f gatekeeper/test/bad-pod-root-user.yaml     → bị reject
+#   kubectl apply -f gatekeeper/test/bad-pod-host-network.yaml  → bị reject
+#   kubectl apply -f gatekeeper/test/good-pod.yaml              → pass ✅
+# =============================================================================
+
+# -------- F-01: Cấm :latest tag --------
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sNoLatestTag
+metadata:
+  name: no-latest-tag
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"   # sau ConstraintTemplate (wave 1)
+spec:
+  # deny = reject ngay; warn = chỉ báo cáo (audit mode)
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    # Không enforce trong kube-system (system pods có thể dùng :latest)
+    excludedNamespaces: ["kube-system", "argocd", "gatekeeper-system"]
+---
+# -------- F-02: Bắt buộc resource limits --------
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireResourceLimits
+metadata:
+  name: require-resource-limits
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    excludedNamespaces: ["kube-system", "argocd", "gatekeeper-system", "monitoring", "argo-rollouts"]
+---
+# -------- F-04: Cấm root user --------
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sNoRootUser
+metadata:
+  name: no-root-user
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment"]
+    excludedNamespaces: ["kube-system", "argocd", "gatekeeper-system", "monitoring", "argo-rollouts"]
+---
+# -------- Cấm hostNetwork/hostPID/hostIPC --------
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sNoHostNetwork
+metadata:
+  name: no-host-network
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    excludedNamespaces: ["kube-system", "argocd", "gatekeeper-system"]
+---
+# -------- Custom: Bắt buộc label owner --------
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredLabels
+metadata:
+  name: require-owner-label
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment"]
+    namespaces: ["demo"]    # Chỉ enforce trong ns demo
+  parameters:
+    labels: ["owner"]       # Truyền tham số: label "owner" là bắt buộc

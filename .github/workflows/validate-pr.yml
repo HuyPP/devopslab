@@ -1,0 +1,52 @@
+# =============================================================================
+# validate-pr.yml — Chạy riêng cho PR (plan-on-PR pattern W9)
+#
+# Mục đích: chạy nhanh trên mỗi PR, chỉ validate YAML
+# Branch Protection sẽ require job "validate-manifests" phải xanh
+# trước khi cho phép merge.
+#
+# Setup Branch Protection:
+#   GitHub → Settings → Branches → Add rule cho main:
+#   ✔ Require a pull request before merging
+#   ✔ Require status checks to pass → chọn "validate-manifests"
+#   ✔ Require branches to be up to date before merging
+# =============================================================================
+name: Validate on PR
+
+on:
+  pull_request:
+    paths:
+      - "k8s/**"
+      - "argocd/**"
+      - "rbac/**"
+      - "gatekeeper/**"
+      - "monitoring/**"
+      - "k8s-rollouts/**"
+
+jobs:
+  validate-manifests:
+    name: validate-manifests    # tên này phải khớp với Branch Protection setting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSLo kc.tgz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf kc.tgz && sudo mv kubeconform /usr/local/bin/
+
+      - name: Validate all manifests
+        run: |
+          echo "=== Validating k8s/ ==="
+          kubeconform -strict -summary -ignore-missing-schemas k8s/
+
+          echo "=== Validating rbac/ ==="
+          kubeconform -strict -summary rbac/
+
+          echo "=== Validating argocd/ ==="
+          kubeconform -strict -summary -ignore-missing-schemas argocd/
+
+          echo "=== Validating monitoring/ ==="
+          kubeconform -strict -summary -ignore-missing-schemas monitoring/
+
+          echo "All manifests valid ✅"

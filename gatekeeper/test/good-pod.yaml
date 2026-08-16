@@ -1,0 +1,27 @@
+# good-pod.yaml — Pod hợp lệ, pass tất cả Gatekeeper constraints
+# kubectl apply -f gatekeeper/test/good-pod.yaml → phải PASS
+apiVersion: v1
+kind: Pod
+metadata:
+  name: good-pod
+  namespace: demo
+  labels:
+    app: test
+    owner: team-platform    # ✅ có label owner
+spec:
+  securityContext:
+    runAsUser: 1000          # ✅ non-root
+    runAsGroup: 1000
+  containers:
+    - name: app
+      image: nginx:1.27.0   # ✅ pin version, không dùng :latest
+      resources:
+        requests:
+          cpu: "10m"
+          memory: "16Mi"
+        limits:
+          cpu: "100m"        # ✅ có limits
+          memory: "64Mi"
+      securityContext:
+        allowPrivilegeEscalation: false
+  # ✅ không có hostNetwork/hostPID/hostIPC

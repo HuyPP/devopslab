@@ -1,0 +1,46 @@
+# =============================================================================
+# no-root-user.yaml — ConstraintTemplate F-04
+#
+# Cấm container chạy với runAsUser: 0 (root)
+#
+# Tại sao?
+#   - Container chạy root = process có UID 0 → nếu escape container
+#     (CVE), attacker có quyền root trên node
+#   - Nhiều CVE container escape chỉ exploit được khi chạy root
+#   - Best practice: luôn dùng non-root user (Dockerfile đã tạo appuser UID 1000)
+# =============================================================================
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8snorootuser
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sNoRootUser
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8snorootuser
+
+        # Chặn nếu pod-level securityContext.runAsUser = 0
+        violation[{"msg": msg}] {
+          sec := input.review.object.spec.securityContext
+          sec.runAsUser == 0
+          msg := "Pod securityContext.runAsUser = 0 (root) bị cấm. Dùng UID >= 1000."
+        }
+
+        # Chặn nếu container-level securityContext.runAsUser = 0
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          container.securityContext.runAsUser == 0
+          msg := sprintf("Container '%v' có securityContext.runAsUser = 0. Dùng UID >= 1000.", [container.name])
+        }
+
+        # Chặn nếu runAsNonRoot = false (tường minh cho phép root)
+        violation[{"msg": msg}] {
+          input.review.object.spec.securityContext.runAsNonRoot == false
+          msg := "Pod securityContext.runAsNonRoot = false bị cấm."
+        }

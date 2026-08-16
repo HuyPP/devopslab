@@ -1,0 +1,100 @@
+# =============================================================================
+# roles.yaml — Định nghĩa 3 vai trò (W10 Lab 1.1)
+#
+# 3 vai trò theo tài liệu W10:
+#   alice  → developer: CRUD workload trong ns demo (Role, không phải ClusterRole)
+#   bob    → sre: xem + thao tác pod toàn cụm (ClusterRole)
+#   carol  → viewer: chỉ đọc toàn cụm (ClusterRole)
+#
+# Nguyên tắc least-privilege:
+#   - developer chỉ có trong 1 namespace → Role
+#   - Không ai có quyền xóa namespace / node
+#   - viewer không có create/update/delete gì cả
+# =============================================================================
+
+# ---------------- developer (alice) — chỉ trong ns demo ----------------
+# Role = namespace-scoped, KHÔNG dùng ClusterRole vì sẽ với sang ns khác
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: developer
+  namespace: demo
+rules:
+  # Quản lý workload: deploy, rollout, scale
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Argo Rollouts CRD
+  - apiGroups: ["argoproj.io"]
+    resources: ["rollouts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pod: xem log, exec vào debug, xóa pod bị stuck
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/exec"]
+    verbs: ["get", "list", "watch", "delete"]
+  # Service và ConfigMap: cần để deploy hoàn chỉnh
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # KHÔNG có: secrets (developer không cần đọc), rolebindings (leo thang quyền)
+---
+# ---------------- sre (bob) — xem + thao tác pod toàn cụm ----------------
+# ClusterRole = cluster-scoped, tất cả namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sre
+rules:
+  # Xem pod toàn cụm — điều tra incident
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/exec"]
+    verbs: ["get", "list", "watch", "delete"]
+  # Xem + scale deployment
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Node: SRE cần xem node status, nhưng không xóa
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # Events: rất quan trọng khi debug
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Metrics và monitoring
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  # ArgoCD: xem app status
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "rollouts"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Namespace: SRE xem được nhưng không tạo/xóa
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+# ---------------- viewer (carol) — chỉ đọc toàn cụm ----------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: viewer
+rules:
+  # Chỉ get/list/watch — không có create/update/delete/patch
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - configmaps
+      - namespaces
+      - events
+      - endpoints
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "rollouts"]
+    verbs: ["get", "list", "watch"]
+  # KHÔNG có: nodes, secrets, rolebindings (sensitive)

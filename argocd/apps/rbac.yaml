@@ -1,0 +1,21 @@
+# =============================================================================
+# rbac.yaml — RBAC roles và rolebindings
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rbac
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/huypp/devopslab.git
+    targetRevision: main
+    path: rbac
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
