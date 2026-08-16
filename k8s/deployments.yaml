@@ -25,7 +25,7 @@ metadata:
     owner: team-platform          # bắt buộc bởi Gatekeeper
     version: v1
 spec:
-  replicas: 2
+  replicas: 3
   selector:
     matchLabels:
       app: api-gateway
