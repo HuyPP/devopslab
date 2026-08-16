@@ -71,9 +71,9 @@ jobs:
       # Kiểm tra không có placeholder chưa thay
       - name: Check no placeholder left in manifests
         run: |
-          echo "── Checking for <YOUR_GITHUB_USER> placeholder ──"
-          if grep -rn "<YOUR_GITHUB_USER>" k8s/ argocd/ k8s-rollouts/ 2>/dev/null; then
-            echo "❌ Vẫn còn placeholder <YOUR_GITHUB_USER>. Thay bằng username thật trước khi merge."
+          echo "── Checking for huypp placeholder ──"
+          if grep -rn "huypp" k8s/ argocd/ k8s-rollouts/ 2>/dev/null; then
+            echo "❌ Vẫn còn placeholder huypp. Thay bằng username thật trước khi merge."
             exit 1
           fi
           echo "✅ Không còn placeholder"
@@ -151,3 +151,4 @@ jobs:
           # SC2086: double quote variables — không có shell script trong Dockerfile này
           ignore: DL3008,DL3013,SC2086
           failure-threshold: warning    # fail nếu có warning trở lên
+
