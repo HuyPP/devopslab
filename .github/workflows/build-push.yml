@@ -95,20 +95,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Skip if not selected service
-        if: >
-          github.event_name == 'workflow_dispatch' &&
-          github.event.inputs.service != '' &&
-          github.event.inputs.service != matrix.service
-        run: |
-          echo "Skipping ${{ matrix.service }} (selected: ${{ github.event.inputs.service }})"
-          exit 0
-
       - name: Set up Docker Buildx
+        # Bỏ qua toàn bộ job nếu workflow_dispatch chọn service khác
+        if: >
+          github.event_name != 'workflow_dispatch' ||
+          github.event.inputs.service == '' ||
+          github.event.inputs.service == matrix.service
         uses: docker/setup-buildx-action@v3
 
       # Tính image tag từ git SHA — immutable, traceable
       - name: Compute image tag
+        if: >
+          github.event_name != 'workflow_dispatch' ||
+          github.event.inputs.service == '' ||
+          github.event.inputs.service == matrix.service
         id: tag
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
@@ -116,6 +116,10 @@ jobs:
           echo "full_tag=${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${SHORT_SHA}" >> $GITHUB_OUTPUT
 
       - name: Build image (no push)
+        if: >
+          github.event_name != 'workflow_dispatch' ||
+          github.event.inputs.service == '' ||
+          github.event.inputs.service == matrix.service
         uses: docker/build-push-action@v6
         with:
           context: services/${{ matrix.service }}
@@ -128,6 +132,11 @@ jobs:
           outputs: type=docker,dest=/tmp/${{ matrix.service }}.tar
 
       - name: Upload image artifact
+        # Chỉ upload nếu step build đã chạy (không bị skip bởi workflow_dispatch)
+        if: >
+          github.event_name != 'workflow_dispatch' ||
+          github.event.inputs.service == '' ||
+          github.event.inputs.service == matrix.service
         uses: actions/upload-artifact@v4
         with:
           name: image-${{ matrix.service }}
@@ -136,6 +145,10 @@ jobs:
 
       # In build summary vào GitHub Actions job summary
       - name: Build summary
+        if: >
+          github.event_name != 'workflow_dispatch' ||
+          github.event.inputs.service == '' ||
+          github.event.inputs.service == matrix.service
         run: |
           echo "## Build: ${{ matrix.service }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Image**: \`${{ steps.tag.outputs.full_tag }}\`" >> $GITHUB_STEP_SUMMARY
@@ -188,7 +201,7 @@ jobs:
 
       # Scan lần 1: in ra bảng để đọc trong log
       - name: Trivy scan — table output (human readable)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ${{ steps.tag.outputs.full_tag }}
           format: table
@@ -198,7 +211,7 @@ jobs:
 
       # Scan lần 2: SARIF format để upload lên GitHub Security tab
       - name: Trivy scan — SARIF output (GitHub Security)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ${{ steps.tag.outputs.full_tag }}
           format: sarif
@@ -216,7 +229,7 @@ jobs:
 
       # Scan lần 3: thật sự fail CI nếu có CVE HIGH/CRITICAL có fix
       - name: Trivy scan — enforcement (fail on CVE)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ${{ steps.tag.outputs.full_tag }}
           format: table
@@ -291,23 +304,37 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - name: Build and push image
-        uses: docker/build-push-action@v6
+      # Load artifact từ job build thay vì build lại từ đầu
+      # → đảm bảo image đã scan chính xác là image được push
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
         with:
-          context: services/${{ matrix.service }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          name: image-${{ matrix.service }}
+          path: /tmp
+
+      - name: Load image from artifact
+        run: docker load -i /tmp/${{ matrix.service }}.tar
+
+      # Retag image với tất cả tags rồi push — không build lại
+      - name: Tag and push image
+        run: |
+          SHORT_SHA="${{ steps.tag.outputs.short_sha }}"
+          SOURCE_TAG="${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${SHORT_SHA}"
+
+          # Push từng tag
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            docker tag "$SOURCE_TAG" "$tag"
+            docker push "$tag"
+            echo "Pushed: $tag"
+          done <<< "${{ steps.meta.outputs.tags }}"
 
       - name: Push summary
         run: |
+          SHORT_SHA="${{ steps.tag.outputs.short_sha }}"
           echo "## Pushed: ${{ matrix.service }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tags**:" >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.meta.outputs.tags }}" | while read tag; do
-            echo "  - \`$tag\`" >> $GITHUB_STEP_SUMMARY
-          done
+          echo "- **Image tag**: \`${SHORT_SHA}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Registry**: \`${{ env.IMAGE_PREFIX }}/${{ matrix.service }}\`" >> $GITHUB_STEP_SUMMARY
 
       # Lưu short_sha ra artifact để job update-manifest đọc được
       - name: Save SHA artifact
@@ -334,14 +361,15 @@ jobs:
     needs: push
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
-      contents: write        # cần để git push
+      contents: write        # cần để git push manifest update
     steps:
       - uses: actions/checkout@v4
         with:
-          # Checkout với token có quyền push
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Fetch toàn bộ history để git log hoạt động
           fetch-depth: 0
+          # ref: main đảm bảo checkout HEAD của main sau khi merge
+          # tránh race condition khi có nhiều push cùng lúc
+          ref: main
 
       - name: Download SHA artifacts
         uses: actions/download-artifact@v4

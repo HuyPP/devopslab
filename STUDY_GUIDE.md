@@ -1,4 +1,4 @@
-# DevOps Study Guide — Ôn tập từ đầu đến cuối
+﻿# DevOps Study Guide — Ôn tập từ đầu đến cuối
 ## Dựa trên project e-commerce devopslab thực tế
 
 > Mỗi mục: **Khái niệm cốt lõi** → **Chỉ vào file thực tế** → **Câu hỏi kiểm tra** → **Thí nghiệm tay**
@@ -452,7 +452,7 @@ ArgoCD detect commit mới → sync → Rollout canary bắt đầu
 ```yaml
 # Job 1: validate-manifests (tên này khớp Branch Protection setting)
 - kubeconform -strict -ignore-missing-schemas k8s/ rbac/ argocd/
-- grep "<YOUR_GITHUB_USER>" → fail nếu còn placeholder
+- grep "huypp" → fail nếu còn placeholder
 
 # Job 2: lint-and-test (matrix: 3 service song song)
 - flake8 app.py --max-line-length=120
@@ -985,7 +985,7 @@ EOF
 # 1. Thay username
 $u = "your-github-username"
 Get-ChildItem -Recurse -Filter "*.yaml" | ForEach-Object {
-  (Get-Content $_.FullName -Raw) -replace '<YOUR_GITHUB_USER>', $u |
+  (Get-Content $_.FullName -Raw) -replace 'huypp', $u |
   Set-Content $_.FullName -NoNewline
 }
 git add . && git commit -m "chore: replace placeholders" && git push
@@ -1182,7 +1182,7 @@ Trả lời không xem tài liệu. Mỗi câu trỏ về 1 file thực tế tro
 
 **C2.** Job `scan` có `fail-fast: false` trong matrix strategy. Job `push` có `needs: [validate, scan]`. Nếu scan của `order-service` fail nhưng `api-gateway` và `product-service` pass — image nào được push lên ghcr.io?
 
-**C3.** `pr-checks.yml` check `grep "<YOUR_GITHUB_USER>"`. Loại kiểm tra này thuộc nhóm nào trong CI best practices? Tại sao đặt ở PR stage thay vì build stage?
+**C3.** `pr-checks.yml` check `grep "huypp"`. Loại kiểm tra này thuộc nhóm nào trong CI best practices? Tại sao đặt ở PR stage thay vì build stage?
 
 ---
 

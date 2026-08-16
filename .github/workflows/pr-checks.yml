@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # pr-checks.yml — Gác cổng trên mọi Pull Request
 #
 # Nguyên tắc "plan-on-PR / apply-on-merge" (W9):
@@ -71,21 +71,29 @@ jobs:
       # Kiểm tra không có placeholder chưa thay
       - name: Check no placeholder left in manifests
         run: |
-          echo "── Checking for huypp placeholder ──"
-          if grep -rn "huypp" k8s/ argocd/ k8s-rollouts/ 2>/dev/null; then
-            echo "❌ Vẫn còn placeholder huypp. Thay bằng username thật trước khi merge."
+          echo "── Checking for <YOUR_GITHUB_USER> placeholder ──"
+          if grep -rn "<YOUR_GITHUB_USER>" k8s/ argocd/ k8s-rollouts/ 2>/dev/null; then
+            echo "❌ Vẫn còn placeholder <YOUR_GITHUB_USER>. Thay bằng username thật trước khi merge."
             exit 1
           fi
           echo "✅ Không còn placeholder"
 
   # ---------------------------------------------------------------------------
   # Job 2: lint-and-test — Lint Python + chạy unit test
-  # Tên job này cũng cần có trong Branch Protection
+  # Tên job này cũng cần có trong Branch Protection.
+  #
+  # LƯU Ý Branch Protection: matrix job tạo tên "lint-and-test (api-gateway)"
+  # Trong Branch Protection phải thêm từng tên:
+  #   "lint-and-test (api-gateway)"
+  #   "lint-and-test (order-service)"
+  #   "lint-and-test (product-service)"
+  # Hoặc dùng wildcard nếu GitHub hỗ trợ.
   # ---------------------------------------------------------------------------
   lint-and-test:
-    name: lint-and-test
+    name: lint-and-test (${{ matrix.service }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false   # service khác vẫn test kể cả khi 1 service fail
       matrix:
         service: [api-gateway, order-service, product-service]
     steps:
@@ -134,9 +142,10 @@ jobs:
   # Phát hiện Dockerfile anti-patterns: dùng :latest, không có HEALTHCHECK, v.v.
   # ---------------------------------------------------------------------------
   dockerfile-lint:
-    name: dockerfile-lint
+    name: dockerfile-lint (${{ matrix.service }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         service: [api-gateway, order-service, product-service]
     steps:
